@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.pytest_cache/
+
+# Local DuckDB + cached data
+data/collector.duckdb
+data/collector.duckdb.wal
+data/raw/
+data/pdfs/
+data/hf_cache/
+
+# Outputs
+output/
+logs/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
