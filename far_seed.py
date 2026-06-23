@@ -51,6 +51,7 @@ AGENCY_MAP = {
     "SSA": "SSA",
     "DOE": "DOE",
     "NRC": "NRC",
+    "NSF": "NSF",
     "UDALL": "Udall Foundation",
     "HHS": "HHS",
     "NASA": "NASA",
