@@ -22,7 +22,7 @@ async def run(prompt: str, target_pages: int = 50, max_depth: int = 1):
     con.execute("INSERT INTO runs (run_id, prompt) VALUES (?, ?)", [run_id, prompt])
     console.print(f"[bold green]Run {run_id}[/]: {prompt}")
 
-    console.print("[cyan]Planning search queries with Gemma 4 31B...[/]")
+    console.print("[cyan]Planning search queries with Qwen3.6...[/]")
     queries = await agent.plan_searches(prompt, n=6)
     for q in queries:
         console.print(f"  - {q}")

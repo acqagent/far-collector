@@ -1,4 +1,4 @@
-"""31B Dense planner + relevance scorer."""
+"""Qwen3.6 planner + relevance scorer."""
 from pydantic import BaseModel, Field
 
 from models import planner, PLANNER_MODEL

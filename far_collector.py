@@ -2,7 +2,7 @@
 
 Phases:
   1. Read manifest (far_parts, far_part_pdfs) produced by far_seed.py
-  2. For each Part overview page, fetch HTML and use the 26B worker to extract
+  2. For each Part overview page, fetch HTML and use the Qwen3.6 worker to extract
      FAR provisions/clauses (52.X-Y rows) into far_provisions_clauses.
   3. For each agency PDF (excluding DoD), download + parse PDF text. Use
      deterministic regex first; fall back to the worker model for missing fields.

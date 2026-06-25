@@ -1,15 +1,10 @@
-"""Centralized clients for the Gemma 4 vLLM endpoints.
-
-For FAR mode we run only the 26B-A4B (3.8B active MoE) on port 8000 and use it
-for both extraction and planning roles. The 31B Dense planner can be added
-later by reverting PLANNER_* to point at port 8001.
-"""
+"""Centralized clients for the Qwen3.6 vLLM endpoint."""
 from openai import AsyncOpenAI
 
-# Fast extraction worker (Gemma 4 26B MoE on port 8000)
+# Fast extraction worker (Qwen3.6 35B MoE on port 8000)
 worker = AsyncOpenAI(base_url="http://localhost:8000/v1", api_key="local")
-WORKER_MODEL = "gemma-26b"
+WORKER_MODEL = "nvidia/Qwen3.6-35B-A3B-NVFP4"
 
-# Planner / scorer — temporarily routed to the 26B (no separate 31B server today)
+# Planner / scorer — same model on port 8000
 planner = AsyncOpenAI(base_url="http://localhost:8000/v1", api_key="local")
-PLANNER_MODEL = "gemma-26b"
+PLANNER_MODEL = "nvidia/Qwen3.6-35B-A3B-NVFP4"

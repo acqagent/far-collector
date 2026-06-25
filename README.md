@@ -25,8 +25,8 @@ Everything runs **locally** on a single workstation (built and tested on an NVID
 
 | Layer | Tool | Why |
 |---|---|---|
-| Inference server | **[vLLM](https://github.com/vllm-project/vllm)** | OpenAI-compatible server with continuous batching; saturates the GPU at FP8 |
-| Model | **Google Gemma 4 26B-A4B-Instruct** (MoE, 3.8B active params), FP8 weights + FP8 KV cache | Sweet spot of capability vs. memory bandwidth on Spark — ~37 tok/s vs. 3 tok/s for a 70B dense model |
+| Inference server | **[vLLM](https://github.com/vllm-project/vllm)** | OpenAI-compatible server with continuous batching; saturates the GPU at FP4 |
+| Model | **NVIDIA Qwen3.6-35B-A3B-NVFP4** (MoE, 3.6B active params), NVFP4 weights | Sweet spot of capability vs. memory bandwidth on Spark — fast throughput with minimal memory footprint |
 | Client | **AsyncOpenAI** (`openai` Python SDK pointed at `localhost:8000/v1`) | Drop-in API; concurrent extraction calls without writing custom HTTP plumbing |
 | Structured output | **Pydantic v2 schemas** + vLLM's `response_format={"type":"json_schema"}` | Constrained decoding gives valid JSON the first time; no regex post-processing |
 | HTML pipeline | **httpx** (async) → **trafilatura** | Polite concurrent fetches with retry, then mainline-content extraction that strips boilerplate |
@@ -35,7 +35,7 @@ Everything runs **locally** on a single workstation (built and tested on an NVID
 | Export | **openpyxl** | Excel with header styling, frozen panes, autosizing, and proper date columns |
 | Retries | **tenacity** | Exponential backoff for transient HTTP failures |
 
-There are two extraction tasks — both go through the same 26B model:
+There are two extraction tasks — both go through the same Qwen3.6 model:
 
 - **`extract_far_clauses`** — given the cleaned text of a FAR Overhaul Part page, emit every `52.X-Y` clause / provision with verbatim body text.
 - **`extract_class_deviations`** — given a deviation PDF's text, emit `{agency, deviation_number, title, effective_date, scope, link}`. Regex first attempts to grab the date and deviation number; the LLM fills in title and scope and any field the regex missed.
@@ -62,7 +62,11 @@ collector/
   collector.py         generic search-driven orchestrator (legacy/optional)
   search.py            Google + DDG seeding for generic mode
   part52_parser.py     bottom-up parser for Part 52 anchor structure
-  auto_export.sh       waits on a long-running PID, then runs export_far.py
+  incremental_pull.py  cron-safe incremental PDF discovery and download
+  incremental_extract.py cron-safe incremental extraction over new PDFs
+  auto_pull.sh         convenience wrapper for scheduled pulls
+  auto_pull.cron       cron configuration for incremental pulls
+  re_extract_all.py    re-run extraction for existing PDFs (ad-hoc)
 
   data/
     raw/               cached HTML (one file per URL hash)
@@ -88,19 +92,19 @@ pip install httpx trafilatura pypdf duckdb openpyxl pydantic openai \
 # For NVIDIA DGX Spark (sm_121 / GB10), build from source against PyTorch 2.11+cu130.
 ```
 
-Gemma 4 is gated; accept the licence on the [Hugging Face model page](https://huggingface.co/google/gemma-4-26B-A4B-it) once and run `huggingface-cli login`.
-
 Start the model server in a separate terminal:
 
 ```bash
-vllm serve google/gemma-4-26B-A4B-it \
-  --served-model-name gemma-26b --port 8000 \
-  --gpu-memory-utilization 0.50 --max-model-len 16384 \
-  --quantization fp8 --kv-cache-dtype fp8 \
-  --enable-auto-tool-choice --tool-call-parser hermes
+vllm serve nvidia/Qwen3.6-35B-A3B-NVFP4 \
+  --served-model-name qwen3.6 \
+  --port 8000 \
+  --gpu-memory-utilization 0.50 \
+  --max-model-len 16384 \
+  --quantization fp4 \
+  --kv-cache-dtype fp4
 ```
 
-Verify: `curl http://localhost:8000/v1/models` should return one model named `gemma-26b`.
+Verify: `curl http://localhost:8000/v1/models` should return one model named `qwen3.6`.
 
 ---
 
@@ -118,6 +122,10 @@ python far_collector.py provisions       # only Part overview pages
 python far_collector.py deviations       # only agency PDFs
 python far_collector.py provisions 52    # only Part 52
 python retry_missing.py                  # redownload manifest gaps
+
+# Incremental (cron-friendly)
+python incremental_pull.py              # discover + download new PDFs only
+python incremental_extract.py           # extract new PDFs into DuckDB
 ```
 
 For long deviation runs, fire-and-forget:
