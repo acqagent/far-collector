@@ -1,7 +1,13 @@
 """LLM extraction with Pydantic schemas. Generic Page schema + FAR-specific schemas."""
 from pydantic import BaseModel, Field
 
-from models import worker, WORKER_MODEL
+from models import client, MODEL
+
+# Single source of truth for how much source text goes to the model.
+# The vLLM server runs with --max-model-len 16384; 20k chars is roughly 5k
+# tokens, which leaves ample room for the prompt and the JSON output.
+# Longer inputs are truncated here — callers should pass the full text.
+MAX_INPUT_CHARS = 20_000
 
 
 class Page(BaseModel):
@@ -38,7 +44,7 @@ class ClassDeviationPage(BaseModel):
     deviations: list[ClassDeviation] = Field(default_factory=list)
 
 
-async def extract_page(url: str, clean_text: str, user_prompt: str) -> Page | None:
+async def extract_page(url: str, clean_text: str, user_prompt: str, max_chars: int = MAX_INPUT_CHARS) -> Page | None:
     if len(clean_text) < 200:
         return None
     sys = (
@@ -46,11 +52,11 @@ async def extract_page(url: str, clean_text: str, user_prompt: str) -> Page | No
         "Return strict JSON matching the schema. Only suggest follow_links that look directly useful."
     )
     try:
-        resp = await worker.chat.completions.create(
-            model=WORKER_MODEL,
+        resp = await client.chat.completions.create(
+            model=MODEL,
             messages=[
                 {"role": "system", "content": sys},
-                {"role": "user", "content": f"URL: {url}\n\nCONTENT:\n{clean_text[:20000]}"},
+                {"role": "user", "content": f"URL: {url}\n\nCONTENT:\n{clean_text[:max_chars]}"},
             ],
             response_format={"type": "json_schema", "json_schema": {
                 "name": "Page", "schema": Page.model_json_schema()
@@ -63,7 +69,7 @@ async def extract_page(url: str, clean_text: str, user_prompt: str) -> Page | No
         return None
 
 
-async def extract_far_clauses(url: str, clean_text: str) -> FARClausePage | None:
+async def extract_far_clauses(url: str, clean_text: str, max_chars: int = MAX_INPUT_CHARS) -> FARClausePage | None:
     if len(clean_text) < 200:
         return None
     sys = (
@@ -73,11 +79,11 @@ async def extract_far_clauses(url: str, clean_text: str) -> FARClausePage | None
         "If multiple clauses appear, return them all. Do not invent fields."
     )
     try:
-        resp = await worker.chat.completions.create(
-            model=WORKER_MODEL,
+        resp = await client.chat.completions.create(
+            model=MODEL,
             messages=[
                 {"role": "system", "content": sys},
-                {"role": "user", "content": f"URL: {url}\n\nCONTENT:\n{clean_text[:20000]}"},
+                {"role": "user", "content": f"URL: {url}\n\nCONTENT:\n{clean_text[:max_chars]}"},
             ],
             response_format={"type": "json_schema", "json_schema": {
                 "name": "FARClausePage", "schema": FARClausePage.model_json_schema()
@@ -90,7 +96,7 @@ async def extract_far_clauses(url: str, clean_text: str) -> FARClausePage | None
         return None
 
 
-async def extract_class_deviations(url: str, clean_text: str) -> ClassDeviationPage | None:
+async def extract_class_deviations(url: str, clean_text: str, max_chars: int = MAX_INPUT_CHARS) -> ClassDeviationPage | None:
     if len(clean_text) < 200:
         return None
     sys = (
@@ -100,11 +106,11 @@ async def extract_class_deviations(url: str, clean_text: str) -> ClassDeviationP
         "If a row mentions DoD, skip it entirely."
     )
     try:
-        resp = await worker.chat.completions.create(
-            model=WORKER_MODEL,
+        resp = await client.chat.completions.create(
+            model=MODEL,
             messages=[
                 {"role": "system", "content": sys},
-                {"role": "user", "content": f"URL: {url}\n\nCONTENT:\n{clean_text[:20000]}"},
+                {"role": "user", "content": f"URL: {url}\n\nCONTENT:\n{clean_text[:max_chars]}"},
             ],
             response_format={"type": "json_schema", "json_schema": {
                 "name": "ClassDeviationPage", "schema": ClassDeviationPage.model_json_schema()

@@ -10,7 +10,9 @@ import httpx
 from pypdf import PdfReader
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-PDF_DIR = Path(__file__).parent / "data" / "pdfs"
+import config
+
+PDF_DIR = config.PDF_DIR
 PDF_DIR.mkdir(parents=True, exist_ok=True)
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; SparkCollector/1.0)"}
@@ -29,11 +31,16 @@ DEVIATION_NUM_PATTERNS = [
 ]
 
 
-def pdf_path(url: str) -> Path:
+def safe_filename(url: str) -> str:
+    """Deterministic on-disk name: <sha256(url)[:16]>_<sanitized-basename>."""
     h = hashlib.sha256(url.encode()).hexdigest()[:16]
     fname = url.rsplit("/", 1)[-1]
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", fname)
-    return PDF_DIR / f"{h}_{safe}"
+    return f"{h}_{safe}"
+
+
+def pdf_path(url: str) -> Path:
+    return PDF_DIR / safe_filename(url)
 
 
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=10))

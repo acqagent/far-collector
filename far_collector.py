@@ -95,7 +95,8 @@ async def crawl_pdfs() -> int:
         dev_num = pe.find_deviation_number(text, fallback_filename=filename)
 
         # LLM second pass for title + scope; we already have agency + dev_num + date.
-        page = await ex.extract_class_deviations(pdf_url, text[:50000])
+        # extract_class_deviations truncates to its MAX_INPUT_CHARS internally.
+        page = await ex.extract_class_deviations(pdf_url, text)
         title, scope = None, None
         if page and page.deviations:
             d = page.deviations[0]

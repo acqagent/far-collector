@@ -90,7 +90,7 @@ async def run(prompt: str, target_pages: int = 50, max_depth: int = 1):
         avg_rel = sum(relevances) / len(relevances) if relevances else 0
         console.print(f"[dim]Collected {collected}/{target_pages}, avg rel {avg_rel:.2f}, frontier {len(frontier)}[/]")
 
-        if not await agent.should_continue(collected, target_pages, avg_rel):
+        if not agent.should_continue(collected, target_pages, avg_rel):
             break
         if not frontier:
             depth += 1

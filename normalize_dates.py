@@ -66,6 +66,10 @@ def main() -> int:
     con.execute("ALTER TABLE far_class_deviations ADD COLUMN IF NOT EXISTS effective_date_kind VARCHAR")
 
     rows = con.execute("SELECT id, effective_date FROM far_class_deviations").fetchall()
+    if not rows:
+        print("far_class_deviations is empty — nothing to normalize.")
+        con.close()
+        return 0
     counts = {}
     for rid, raw in rows:
         d, kind = normalize(raw)

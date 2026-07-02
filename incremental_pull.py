@@ -7,11 +7,12 @@ and re-run extraction over everything), this script:
 
   1. Fetches the live deviation-guide HTML.
   2. Extracts every PDF URL it links to.
-  3. Diffs against PDFs already on disk in data/pdfs/ AND
-     /home/dgxgape/far-deviations/corpus/pdfs/.
-  4. Downloads only the new ones into BOTH locations (deterministic
-     `<sha256[:16]>_<safe-filename>` naming, matching the rest of the corpus).
-  5. Writes a JSON manifest of new PDFs to logs/new_pdfs_<UTC>.json so
+  3. Diffs against PDFs already on disk in config.PDF_DIR (and, if
+     FAR_CORPUS_PDF_DIR is set, the external corpus directory too).
+  4. Downloads only the new ones (deterministic `<sha256[:16]>_<safe-filename>`
+     naming, matching the rest of the corpus), mirroring into the corpus
+     directory when one is configured.
+  5. Writes a JSON manifest of new PDFs to <LOG_DIR>/new_pdfs_<UTC>.json so
      downstream extraction (and the HHS P&C update flow) can pick them up.
   6. Optionally appends the new rows to the DuckDB manifest tables so they
      show up in subsequent far_collector.py runs.
@@ -27,9 +28,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -39,31 +38,30 @@ from urllib.parse import urljoin
 import httpx
 from bs4 import BeautifulSoup
 
-# Re-use logic from the existing seeder so naming stays in sync
+# Re-use logic from the existing seeder/downloader so naming stays in sync
 sys.path.insert(0, str(Path(__file__).parent))
+import config  # noqa: E402
 from far_seed import (  # noqa: E402
     GUIDE_URL, BASE, PDF_LINK_RE, agency_from_filename, parts_from_filename,
 )
+from pdf_extract import safe_filename  # noqa: E402
 
-COLLECTOR_PDF_DIR = Path("/home/dgxgape/collector/data/pdfs")
-CORPUS_PDF_DIR = Path("/home/dgxgape/far-deviations/corpus/pdfs")
-LOG_DIR = Path("/home/dgxgape/collector/logs")
+COLLECTOR_PDF_DIR = config.PDF_DIR
+CORPUS_PDF_DIR = config.CORPUS_PDF_DIR   # optional mirror; None if unset
+LOG_DIR = config.LOG_DIR
 HEADERS = {"User-Agent": "SparkCollector/1.0 incremental-pull"}
 
 
-def safe_filename(url: str) -> str:
-    h = hashlib.sha256(url.encode()).hexdigest()[:16]
-    fname = url.rsplit("/", 1)[-1]
-    safe = re.sub(r"[^A-Za-z0-9._-]", "_", fname)
-    return f"{h}_{safe}"
+def _pdf_dirs() -> list[Path]:
+    return [d for d in (COLLECTOR_PDF_DIR, CORPUS_PDF_DIR) if d is not None]
 
 
 def already_have(url: str) -> bool:
     fn = safe_filename(url)
-    p1 = COLLECTOR_PDF_DIR / fn
-    p2 = CORPUS_PDF_DIR / fn
-    return (p1.exists() and p1.stat().st_size > 1024) or \
-           (p2.exists() and p2.stat().st_size > 1024)
+    return any(
+        (d / fn).exists() and (d / fn).stat().st_size > 1024
+        for d in _pdf_dirs()
+    )
 
 
 def fetch_guide_html(client: httpx.Client) -> str:
@@ -88,7 +86,7 @@ def discover_pdf_urls(html: str) -> list[str]:
 
 
 def download_one(url: str, client: httpx.Client) -> tuple[Path | None, str | None]:
-    """Returns (path-on-disk, error). Writes to BOTH collector and corpus dirs."""
+    """Returns (path-on-disk, error). Mirrors into the corpus dir if configured."""
     try:
         r = client.get(url, timeout=120, follow_redirects=True)
         if r.status_code != 200:
@@ -96,7 +94,7 @@ def download_one(url: str, client: httpx.Client) -> tuple[Path | None, str | Non
         if len(r.content) < 1024:
             return None, f"too small ({len(r.content)} bytes)"
         fn = safe_filename(url)
-        for d in (COLLECTOR_PDF_DIR, CORPUS_PDF_DIR):
+        for d in _pdf_dirs():
             d.mkdir(parents=True, exist_ok=True)
             (d / fn).write_bytes(r.content)
         return COLLECTOR_PDF_DIR / fn, None

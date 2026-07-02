@@ -48,7 +48,8 @@ A separate script (`normalize_dates.py`) post-processes the free-text effective 
 
 ```
 collector/
-  models.py            AsyncOpenAI clients pointed at the local vLLM endpoint
+  config.py            central paths + endpoints, all overridable via env vars
+  models.py            AsyncOpenAI client pointed at the local vLLM endpoint
   db.py                DuckDB schema (urls, pages, runs, FAR tables)
   fetch.py             async httpx + trafilatura with raw-HTML cache
   pdf_extract.py       async PDF download + pypdf + regex date heuristics
@@ -67,6 +68,9 @@ collector/
   auto_pull.sh         convenience wrapper for scheduled pulls
   auto_pull.cron       cron configuration for incremental pulls
   re_extract_all.py    re-run extraction for existing PDFs (ad-hoc)
+  sync_manifest.py     reconcile the external corpus manifest with on-disk PDFs
+  regenerate_manifest.py rebuild the corpus manifest from disk + DuckDB
+  tests/               pytest suite for the deterministic parsing layers
 
   data/
     raw/               cached HTML (one file per URL hash)
@@ -84,13 +88,33 @@ Everything under `data/`, `output/`, and `logs/` is `.gitignore`d.
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install httpx trafilatura pypdf duckdb openpyxl pydantic openai \
-            tenacity python-dateutil rich beautifulsoup4 lxml
+pip install -r requirements.txt
+
+# Optional extras:
+pip install -r requirements-generic.txt   # legacy search-driven generic mode
+pip install -r requirements-dev.txt       # pytest, for running the test suite
 
 # vLLM is the heavy install — follow the official instructions for your CUDA
 # version: https://docs.vllm.ai/en/latest/getting_started/installation.html
 # For NVIDIA DGX Spark (sm_121 / GB10), build from source against PyTorch 2.11+cu130.
 ```
+
+### Configuration
+
+Everything defaults to paths inside the repo and `localhost:8000`; override with
+environment variables (see `config.py`):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `FAR_DATA_DIR` | `./data` | root for the DuckDB + caches |
+| `FAR_RAW_DIR` / `FAR_PDF_DIR` | `$FAR_DATA_DIR/raw`, `.../pdfs` | HTML / PDF caches |
+| `FAR_DB_PATH` | `$FAR_DATA_DIR/collector.duckdb` | the DuckDB file |
+| `FAR_LOG_DIR` | `./logs` | run logs + incremental-pull manifests |
+| `FAR_CORPUS_PDF_DIR` | *(unset)* | optional second directory to mirror PDFs into |
+| `FAR_CORPUS_MANIFEST` | *(unset)* | corpus manifest CSV for `sync_manifest.py` / `regenerate_manifest.py` |
+| `FAR_LLM_BASE_URL` | `http://localhost:8000/v1` | OpenAI-compatible endpoint |
+| `FAR_LLM_MODEL` | `nvidia/Qwen3.6-35B-A3B-NVFP4` | served model name |
+| `FAR_FETCH_USE_CACHE` | *(unset)* | set to `1` to serve HTML re-fetches from the raw cache |
 
 Start the model server in a separate terminal:
 
@@ -126,6 +150,9 @@ python retry_missing.py                  # redownload manifest gaps
 # Incremental (cron-friendly)
 python incremental_pull.py              # discover + download new PDFs only
 python incremental_extract.py           # extract new PDFs into DuckDB
+
+# Tests (no network, no LLM needed)
+python -m pytest
 ```
 
 For long deviation runs, fire-and-forget:

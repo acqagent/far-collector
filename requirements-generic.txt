@@ -1,0 +1,5 @@
+# Extra dependencies for the legacy/optional generic search mode
+# (collector.py + search.py). Not needed for FAR mode.
+ddgs>=6.0
+googlesearch-python>=1.2
+tldextract>=5.0

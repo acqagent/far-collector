@@ -1,7 +1,7 @@
-# /home/dgxgape/collector/auto_pull.cron
-# Install with:   crontab -l > /tmp/cur.cron 2>/dev/null; cat /home/dgxgape/collector/auto_pull.cron >> /tmp/cur.cron && crontab /tmp/cur.cron
+# auto_pull.cron — replace /path/to/far-collector with your clone's location.
+# Install with:   crontab -l > /tmp/cur.cron 2>/dev/null; cat auto_pull.cron >> /tmp/cur.cron && crontab /tmp/cur.cron
 # Inspect with:   crontab -l
 # Remove with:    crontab -e   (delete the auto_pull line)
 
 # Daily at 06:30 local: discover + download + extract any new acquisition.gov FAR class deviation PDFs
-30 6 * * *  /home/dgxgape/collector/auto_pull.sh >/dev/null 2>&1
+30 6 * * *  /path/to/far-collector/auto_pull.sh >/dev/null 2>&1
