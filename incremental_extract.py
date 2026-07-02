@@ -27,12 +27,13 @@ from pathlib import Path
 import httpx
 
 sys.path.insert(0, str(Path(__file__).parent))
+import config                   # type: ignore  # noqa: E402
 import db                       # type: ignore  # noqa: E402
 import pdf_extract as pe        # type: ignore  # noqa: E402
 
-LOG_DIR = Path("/home/dgxgape/collector/logs")
+LOG_DIR = config.LOG_DIR
 DEFAULT_MANIFEST = LOG_DIR / "new_pdfs_latest.json"
-LLM_BASE = "http://localhost:8000/v1"   # collector convention; see models.py
+LLM_BASE = config.LLM_BASE_URL
 
 
 def llm_alive() -> bool:
@@ -47,7 +48,7 @@ async def llm_enrich(pdf_url: str, text: str) -> tuple[str | None, str | None]:
     """Returns (title, scope) from the worker model, or (None, None) on failure."""
     try:
         import extract as ex          # type: ignore
-        page = await ex.extract_class_deviations(pdf_url, text[:50000])
+        page = await ex.extract_class_deviations(pdf_url, text)
         if page and page.deviations:
             d = page.deviations[0]
             return d.title, d.scope

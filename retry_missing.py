@@ -63,7 +63,7 @@ async def main() -> int:
             continue
         eff = pe.find_effective_date(text)
         dev_num = pe.find_deviation_number(text, fallback_filename=filename)
-        page = await ex.extract_class_deviations(pdf_url, text[:50000])
+        page = await ex.extract_class_deviations(pdf_url, text)
         title, scope = None, None
         if page and page.deviations:
             d = page.deviations[0]

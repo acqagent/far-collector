@@ -1,11 +1,13 @@
 """DuckDB schema. Adds FAR-specific tables on top of the doc's urls/pages/runs."""
 import duckdb
-from pathlib import Path
 
-DB = Path(__file__).parent / "data" / "collector.duckdb"
+import config
+
+DB = config.DB_PATH
 
 
 def init():
+    DB.parent.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(DB)
     con.execute("""
         CREATE TABLE IF NOT EXISTS urls (
@@ -59,6 +61,7 @@ def init():
 
 
 def get():
+    DB.parent.mkdir(parents=True, exist_ok=True)
     return duckdb.connect(DB)
 
 

@@ -7,11 +7,14 @@ import httpx
 from datetime import datetime
 from pathlib import Path
 
+import config
+
 # Setup model
 from openai import OpenAI
-client = OpenAI(base_url='http://localhost:8000/v1', api_key='placeholder')
+client = OpenAI(base_url=config.LLM_BASE_URL, api_key=config.LLM_API_KEY)
 
-CORPUS_DIR = Path('/home/dgxgape/far-deviations/corpus/pdfs')
+# Prefer the external corpus if configured, else the collector's own PDF cache.
+CORPUS_DIR = config.CORPUS_PDF_DIR or config.PDF_DIR
 
 # System prompt
 SYSTEM = (
@@ -37,7 +40,7 @@ async def extract_from_pdf(path: Path) -> dict | None:
         filename_part = fname.split('_', 1)[1] if '_' in fname else fname
         
         response = client.chat.completions.create(
-            model='nvidia/Qwen3.6-35B-A3B-NVFP4',
+            model=config.LLM_MODEL,
             messages=[
                 {'role': 'system', 'content': SYSTEM},
                 {'role': 'user', 'content': (
@@ -60,7 +63,7 @@ async def extract_from_pdf(path: Path) -> dict | None:
                     'title': result.get('title', ''),
                     'scope': result.get('scope', ''),
                 }
-        except:
+        except (json.JSONDecodeError, AttributeError):
             pass
         
         return {
@@ -74,8 +77,7 @@ async def extract_from_pdf(path: Path) -> dict | None:
 
 async def main():
     import duckdb
-    db_path = Path('/home/dgxgape/collector/data/collector.duckdb')
-    con = duckdb.connect(str(db_path))
+    con = duckdb.connect(str(config.DB_PATH))
     
     # Get all deviations that need title/scope
     rows = con.execute("""

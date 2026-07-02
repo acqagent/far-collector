@@ -1,96 +1,115 @@
-"""Regenerate manifest.csv from PDFs on disk + DuckDB dev_data."""
-import csv, hashlib, os, sys
+"""Regenerate the corpus manifest.csv from PDFs on disk + the DuckDB manifest.
+
+Requires FAR_CORPUS_MANIFEST and FAR_CORPUS_PDF_DIR to be set (see config.py).
+
+For each PDF in the corpus directory, metadata is filled from (in order):
+  1. the existing manifest.csv row, if any
+  2. the DuckDB far_part_pdfs manifest (keyed by on-disk filename)
+  3. the filename itself (hash prefix + original name)
+"""
+import csv
+import sys
+from datetime import datetime, timezone
 from pathlib import Path
-from datetime import datetime
 
-MANIFEST_PATH = Path("/home/dgxgape/far-deviations/manifest.csv")
-COLLECTOR_PDF_DIR = Path("/home/dgxgape/far-deviations/corpus/pdfs")
+import config
+from pdf_extract import safe_filename
 
-# Read existing manifest to get metadata from DuckDB if available
-def get_db_metadata():
-    """Read metadata from collector DuckDB if it exists."""
+MANIFEST_PATH = config.CORPUS_MANIFEST
+CORPUS_PDF_DIR = config.CORPUS_PDF_DIR
+
+HEADER = ['on_disk_filename', 'url_hash', 'original_filename', 'agency',
+          'part_number', 'is_dod', 'source_url', 'pdf_size_bytes']
+
+
+def get_db_metadata() -> dict[str, dict]:
+    """Metadata per on-disk filename, from the DuckDB far_part_pdfs manifest."""
     import duckdb
+    meta: dict[str, dict] = {}
     try:
-        db_path = Path("/home/dgxgape/collector/data/collector.duckdb")
-        if db_path.exists():
-            con = duckdb.connect(str(db_path))
-            rows = con.execute("""
-                SELECT id, agency, deviation_number, effective_date, 
-                       pdf_size_bytes, source_url 
-                FROM far_class_deviations
-            """).fetchall()
-            con.close()
-            meta = {}
-            for row in rows:
-                meta[row[0]] = {
-                    'agency': row[1], 'deviation_number': row[2],
-                    'effective_date': row[3], 'pdf_size_bytes': row[5],
-                    'source_url': row[5] if row[5] else ''
-                }
+        if not config.DB_PATH.exists():
             return meta
+        con = duckdb.connect(str(config.DB_PATH), read_only=True)
+        rows = con.execute("""
+            SELECT pdf_url, agency, filename, part_number, is_dod
+            FROM far_part_pdfs
+        """).fetchall()
+        con.close()
+        for pdf_url, agency, filename, part_number, is_dod in rows:
+            key = safe_filename(pdf_url)
+            entry = meta.setdefault(key, {
+                'url_hash': key.split('_', 1)[0],
+                'original_filename': filename,
+                'agency': agency,
+                'part_numbers': [],
+                'is_dod': '1' if is_dod else '0',
+                'source_url': pdf_url,
+            })
+            if part_number is not None and part_number >= 0:
+                entry['part_numbers'].append(part_number)
     except Exception as e:
         print(f"Warning: could not read DuckDB: {e}", file=sys.stderr)
-    return {}
+    return meta
 
-# Build metadata from existing manifest
-def read_existing_manifest():
+
+def read_existing_manifest() -> dict[str, dict]:
     meta = {}
     if MANIFEST_PATH.exists():
         with open(MANIFEST_PATH) as f:
-            reader = csv.DictReader(f)
-            for row in reader:
+            for row in csv.DictReader(f):
                 meta[row['on_disk_filename']] = row
     return meta
 
-# Generate new manifest from on-disk PDFs
-def generate_manifest(existing_meta):
+
+def generate_manifest(existing_meta: dict[str, dict], db_meta: dict[str, dict]) -> list[dict]:
     rows = []
-    for pdf_path in sorted(COLLECTOR_PDF_DIR.glob("*.pdf")):
+    for pdf_path in sorted(CORPUS_PDF_DIR.glob("*.pdf")):
         fname = pdf_path.name
         size = pdf_path.stat().st_size
-        
-        # Use existing metadata if available
-        if fname in existing_meta:
-            row = {
-                'on_disk_filename': fname,
-                'url_hash': existing_meta[fname].get('url_hash', ''),
-                'original_filename': existing_meta[fname].get('original_filename', ''),
-                'agency': existing_meta[fname].get('agency', ''),
-                'part_number': existing_meta[fname].get('part_number', ''),
-                'is_dod': existing_meta[fname].get('is_dod', ''),
-                'source_url': existing_meta[fname].get('source_url', ''),
-                'pdf_size_bytes': size
-            }
-        else:
-            # Extract metadata from filename
-            parts = fname.split('_', 1)
-            url_hash = parts[0] if parts else hashlib.sha256(fname.encode()).hexdigest()[:16]
-            orig_name = parts[1] if len(parts) > 1 else fname
-            row = {
-                'on_disk_filename': fname,
-                'url_hash': url_hash,
-                'original_filename': orig_name,
-                'agency': '',
-                'part_number': '',
-                'is_dod': '0',
-                'source_url': '',
-                'pdf_size_bytes': size
-            }
+        existing = existing_meta.get(fname, {})
+        db = db_meta.get(fname, {})
+
+        parts = fname.split('_', 1)
+        row = {
+            'on_disk_filename': fname,
+            'url_hash': existing.get('url_hash') or db.get('url_hash') or parts[0],
+            'original_filename': (existing.get('original_filename')
+                                  or db.get('original_filename')
+                                  or (parts[1] if len(parts) > 1 else fname)),
+            'agency': existing.get('agency') or db.get('agency') or '',
+            'part_number': (existing.get('part_number')
+                            or ';'.join(str(n) for n in sorted(set(db.get('part_numbers', []))))),
+            'is_dod': existing.get('is_dod') or db.get('is_dod') or '0',
+            'source_url': existing.get('source_url') or db.get('source_url') or '',
+            'pdf_size_bytes': size,
+        }
         rows.append(row)
     return rows
 
-# Main
-existing_meta = read_existing_manifest()
-db_meta = get_db_metadata()
-rows = generate_manifest(existing_meta)
 
-# Write new manifest
-header = ['on_disk_filename', 'url_hash', 'original_filename', 'agency', 
-          'part_number', 'is_dod', 'source_url', 'pdf_size_bytes']
-with open(MANIFEST_PATH, 'w', newline='') as f:
-    writer = csv.DictWriter(f, fieldnames=header)
-    writer.writeheader()
-    writer.writerows(rows)
+def main() -> int:
+    if MANIFEST_PATH is None or CORPUS_PDF_DIR is None:
+        print("Set FAR_CORPUS_MANIFEST and FAR_CORPUS_PDF_DIR to use this script "
+              "(see config.py).", file=sys.stderr)
+        return 2
+    if not CORPUS_PDF_DIR.is_dir():
+        print(f"Corpus PDF dir not found: {CORPUS_PDF_DIR}", file=sys.stderr)
+        return 2
 
-print(f"Wrote {len(rows)} rows to {MANIFEST_PATH}")
-print(f"Date: {datetime.utcnow().strftime('%Y-%m-%d')}")
+    existing_meta = read_existing_manifest()
+    db_meta = get_db_metadata()
+    rows = generate_manifest(existing_meta, db_meta)
+
+    MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(MANIFEST_PATH, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=HEADER)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    print(f"Wrote {len(rows)} rows to {MANIFEST_PATH}")
+    print(f"Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d')}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -5,19 +5,21 @@
 # Safe to run unattended. All output appended to logs/auto_pull.log with a
 # timestamped header. Exit code is best-effort (non-zero on real failures).
 #
-# Suggested cron (daily 06:30 local):
-#   30 6 * * *  /home/dgxgape/collector/auto_pull.sh
+# Suggested cron (daily 06:30 local; see auto_pull.cron):
+#   30 6 * * *  /path/to/far-collector/auto_pull.sh
 #
 # Optional flags forwarded to incremental_pull.py:
-#   AUTO_PULL_FLAGS="--max-downloads 50"  /home/dgxgape/collector/auto_pull.sh
+#   AUTO_PULL_FLAGS="--max-downloads 50"  ./auto_pull.sh
 
 set -u
 set -o pipefail
 
-ROOT="/home/dgxgape/collector"
+ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PY="$ROOT/.venv/bin/python"
-LOG="$ROOT/logs/auto_pull.log"
-mkdir -p "$ROOT/logs"
+[[ -x "$PY" ]] || PY="$(command -v python3)"
+LOG_DIR="${FAR_LOG_DIR:-$ROOT/logs}"
+LOG="$LOG_DIR/auto_pull.log"
+mkdir -p "$LOG_DIR"
 
 stamp() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 log()   { echo "[$(stamp)] $*" | tee -a "$LOG" >&2; }
@@ -32,7 +34,7 @@ SCRAPE_RC=${PIPESTATUS[0]}
 log "incremental_pull rc=$SCRAPE_RC"
 
 # 2) Extract metadata for any newly-downloaded PDFs
-LATEST="$ROOT/logs/new_pdfs_latest.json"
+LATEST="$LOG_DIR/new_pdfs_latest.json"
 if [[ -f "$LATEST" ]]; then
     NEW_COUNT=$("$PY" -c "import json; print(json.load(open('$LATEST'))['downloaded_count'])" 2>/dev/null || echo 0)
     log "step 2/3: incremental_extract on $NEW_COUNT newly-downloaded PDFs"

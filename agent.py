@@ -1,7 +1,7 @@
 """Qwen3.6 planner + relevance scorer."""
 from pydantic import BaseModel, Field
 
-from models import planner, PLANNER_MODEL
+from models import client, MODEL
 
 
 class Plan(BaseModel):
@@ -16,8 +16,8 @@ class Relevance(BaseModel):
 
 
 async def plan_searches(user_prompt: str, n: int = 6) -> list[str]:
-    resp = await planner.chat.completions.create(
-        model=PLANNER_MODEL,
+    resp = await client.chat.completions.create(
+        model=MODEL,
         messages=[
             {"role": "system", "content": (
                 f"You generate {n} diverse, specific search queries to collect data on a topic.\n"
@@ -37,8 +37,8 @@ async def plan_searches(user_prompt: str, n: int = 6) -> list[str]:
 
 
 async def score_relevance(user_prompt: str, page_title: str, page_body: str) -> Relevance:
-    resp = await planner.chat.completions.create(
-        model=PLANNER_MODEL,
+    resp = await client.chat.completions.create(
+        model=MODEL,
         messages=[
             {"role": "system", "content": (
                 f'Score page relevance for the user\'s collection goal: "{user_prompt}".\n'
@@ -54,7 +54,7 @@ async def score_relevance(user_prompt: str, page_title: str, page_body: str) -> 
     return Relevance.model_validate_json(resp.choices[0].message.content)
 
 
-async def should_continue(collected: int, target: int, avg_relevance: float) -> bool:
+def should_continue(collected: int, target: int, avg_relevance: float) -> bool:
     if collected >= target:
         return False
     if collected > 20 and avg_relevance < 0.35:
