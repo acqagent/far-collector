@@ -7,8 +7,9 @@ effective date + deviation number, and INSERT-OR-REPLACEs a row into the
 DuckDB `far_class_deviations` table.
 
 The LLM second pass (title + scope refinement) is OPTIONAL: it runs only
-if the configured vLLM endpoint answers /v1/models. If it isn't running,
-this script still records a usable row using the filename as title.
+if the configured OpenAI-compatible endpoint answers /v1/models with the
+configured model id. If it isn't running, this script still records a usable
+row using the filename as title.
 
 Usage:
     python incremental_extract.py                        # process latest manifest
@@ -24,24 +25,14 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-import httpx
-
 sys.path.insert(0, str(Path(__file__).parent))
 import config                   # type: ignore  # noqa: E402
 import db                       # type: ignore  # noqa: E402
+import models                   # type: ignore  # noqa: E402
 import pdf_extract as pe        # type: ignore  # noqa: E402
 
 LOG_DIR = config.LOG_DIR
 DEFAULT_MANIFEST = LOG_DIR / "new_pdfs_latest.json"
-LLM_BASE = config.LLM_BASE_URL
-
-
-def llm_alive() -> bool:
-    try:
-        r = httpx.get(f"{LLM_BASE}/models", timeout=2)
-        return r.status_code == 200
-    except Exception:
-        return False
 
 
 async def llm_enrich(pdf_url: str, text: str) -> tuple[str | None, str | None]:
@@ -57,7 +48,7 @@ async def llm_enrich(pdf_url: str, text: str) -> tuple[str | None, str | None]:
     return None, None
 
 
-def process(manifest_path: Path, use_llm: bool) -> int:
+async def process(manifest_path: Path, use_llm: bool) -> int:
     if not manifest_path.exists():
         print(f"[error] manifest not found: {manifest_path}")
         return 2
@@ -67,9 +58,15 @@ def process(manifest_path: Path, use_llm: bool) -> int:
     if not new:
         return 0
 
-    do_llm = use_llm and llm_alive()
-    if use_llm and not do_llm:
-        print("  [info] LLM endpoint not reachable — falling back to regex-only extraction.")
+    do_llm = False
+    if use_llm:
+        # models.probe() authenticates and checks the served model id. An
+        # unauthenticated probe reads a bearer-token server's 401 as "down"
+        # and silently downgrades the whole run to regex-only.
+        do_llm, detail = models.probe()
+        print(f"  [info] LLM {'ready' if do_llm else 'unavailable'}: {detail}")
+        if not do_llm:
+            print("  [info] falling back to regex-only extraction.")
 
     db.init()
     con = db.get()
@@ -90,7 +87,7 @@ def process(manifest_path: Path, use_llm: bool) -> int:
         title, scope = None, None
 
         if do_llm:
-            title, scope = asyncio.run(llm_enrich(rec["pdf_url"], text))
+            title, scope = await llm_enrich(rec["pdf_url"], text)
         if not title:
             title = rec["filename"].replace(".pdf", "").replace("_", " ")
 
@@ -115,7 +112,11 @@ def main() -> int:
     ap.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     ap.add_argument("--no-llm", action="store_true")
     args = ap.parse_args()
-    return process(args.manifest, use_llm=not args.no_llm)
+    # One event loop for the whole batch. A loop per PDF tore down the shared
+    # client's connection pool on every document, and could not share the
+    # concurrency semaphore in models.py — that binds to the loop it first
+    # waits on and raises in the next one.
+    return asyncio.run(process(args.manifest, use_llm=not args.no_llm))
 
 
 if __name__ == "__main__":

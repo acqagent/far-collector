@@ -1,13 +1,18 @@
-"""LLM extraction with Pydantic schemas. Generic Page schema + FAR-specific schemas."""
+"""LLM extraction with Pydantic schemas. Generic Page schema + FAR-specific schemas.
+
+Every call goes through models.complete_json(), which owns the request
+plumbing (auth, thinking budget, concurrency, constrained-decoding fallback).
+"""
 from pydantic import BaseModel, Field
 
-from models import client, MODEL
+import config
+from models import complete_json
 
-# Single source of truth for how much source text goes to the model.
-# The vLLM server runs with --max-model-len 16384; 20k chars is roughly 5k
-# tokens, which leaves ample room for the prompt and the JSON output.
-# Longer inputs are truncated here — callers should pass the full text.
-MAX_INPUT_CHARS = 20_000
+# Single source of truth for how much source text goes to the model, overridable
+# with FAR_LLM_MAX_INPUT_CHARS. Qwen3.8 on SGLang serves a 262k context, so the
+# binding constraint is generation time, not the window. Longer inputs are
+# truncated here — callers should pass the full text.
+MAX_INPUT_CHARS = config.LLM_MAX_INPUT_CHARS
 
 
 class Page(BaseModel):
@@ -44,6 +49,13 @@ class ClassDeviationPage(BaseModel):
     deviations: list[ClassDeviation] = Field(default_factory=list)
 
 
+def _messages(system: str, url: str, clean_text: str, max_chars: int) -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": f"URL: {url}\n\nCONTENT:\n{clean_text[:max_chars]}"},
+    ]
+
+
 async def extract_page(url: str, clean_text: str, user_prompt: str, max_chars: int = MAX_INPUT_CHARS) -> Page | None:
     if len(clean_text) < 200:
         return None
@@ -52,18 +64,9 @@ async def extract_page(url: str, clean_text: str, user_prompt: str, max_chars: i
         "Return strict JSON matching the schema. Only suggest follow_links that look directly useful."
     )
     try:
-        resp = await client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {"role": "system", "content": sys},
-                {"role": "user", "content": f"URL: {url}\n\nCONTENT:\n{clean_text[:max_chars]}"},
-            ],
-            response_format={"type": "json_schema", "json_schema": {
-                "name": "Page", "schema": Page.model_json_schema()
-            }},
-            temperature=0.1,
+        return await complete_json(
+            Page, _messages(sys, url, clean_text, max_chars), temperature=0.1,
         )
-        return Page.model_validate_json(resp.choices[0].message.content)
     except Exception as e:
         print(f"Extract failed for {url}: {e}")
         return None
@@ -79,18 +82,9 @@ async def extract_far_clauses(url: str, clean_text: str, max_chars: int = MAX_IN
         "If multiple clauses appear, return them all. Do not invent fields."
     )
     try:
-        resp = await client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {"role": "system", "content": sys},
-                {"role": "user", "content": f"URL: {url}\n\nCONTENT:\n{clean_text[:max_chars]}"},
-            ],
-            response_format={"type": "json_schema", "json_schema": {
-                "name": "FARClausePage", "schema": FARClausePage.model_json_schema()
-            }},
-            temperature=0.0,
+        return await complete_json(
+            FARClausePage, _messages(sys, url, clean_text, max_chars), temperature=0.0,
         )
-        return FARClausePage.model_validate_json(resp.choices[0].message.content)
     except Exception as e:
         print(f"FAR clause extract failed for {url}: {e}")
         return None
@@ -106,18 +100,9 @@ async def extract_class_deviations(url: str, clean_text: str, max_chars: int = M
         "If a row mentions DoD, skip it entirely."
     )
     try:
-        resp = await client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {"role": "system", "content": sys},
-                {"role": "user", "content": f"URL: {url}\n\nCONTENT:\n{clean_text[:max_chars]}"},
-            ],
-            response_format={"type": "json_schema", "json_schema": {
-                "name": "ClassDeviationPage", "schema": ClassDeviationPage.model_json_schema()
-            }},
-            temperature=0.0,
+        return await complete_json(
+            ClassDeviationPage, _messages(sys, url, clean_text, max_chars), temperature=0.0,
         )
-        return ClassDeviationPage.model_validate_json(resp.choices[0].message.content)
     except Exception as e:
         print(f"Class deviation extract failed for {url}: {e}")
         return None
