@@ -1,75 +1,59 @@
-"""Re-extract title + scope for ALL existing PDFs using the running Qwen model."""
+"""Re-extract title + scope for ALL existing PDFs using the running local model."""
 import asyncio
-import json
 import sys
-import pypdf
-import httpx
 from datetime import datetime
 from pathlib import Path
 
-import config
+import pypdf
+from pydantic import BaseModel, Field
 
-# Setup model
-from openai import OpenAI
-client = OpenAI(base_url=config.LLM_BASE_URL, api_key=config.LLM_API_KEY)
+import config
+import models
 
 # Prefer the external corpus if configured, else the collector's own PDF cache.
 CORPUS_DIR = config.CORPUS_PDF_DIR or config.PDF_DIR
 
-# System prompt
+# Same input ceiling as the main extraction path unless overridden.
+MAX_INPUT_CHARS = config.LLM_MAX_INPUT_CHARS
+
 SYSTEM = (
-    "You are an assistant that extracts structured information from Federal "
-    "Acquisition Regulation (FAR) class deviation memos. Return ONLY a JSON "
-    "object with these fields:\n"
-    "  - \"title\": brief title describing the deviation (one line)\n"
-    "  - \"scope\": 2-3 sentence summary of what the deviation covers\n"
-    "Do not include any text outside the JSON object.\n"
+    "You extract structured information from Federal Acquisition Regulation "
+    "(FAR) class deviation memos. Report what the document says; do not invent "
+    "details that are not in the text."
 )
 
+
+class DeviationSummary(BaseModel):
+    title: str = Field(description="Brief title describing the deviation (one line)")
+    scope: str = Field(description="2-3 sentence summary of what the deviation covers")
+
+
 async def extract_from_pdf(path: Path) -> dict | None:
-    """Extract text from PDF and send to LLM for title + scope."""
+    """Extract text from a PDF and ask the model for title + scope."""
     try:
         pdf = pypdf.PdfReader(str(path))
-        text = ''
+        text = ""
         for page in pdf.pages:
-            text += page.extract_text() or ''
+            text += page.extract_text() or ""
         if len(text) < 200:
             return None
-        
+
         fname = path.name
-        filename_part = fname.split('_', 1)[1] if '_' in fname else fname
-        
-        response = client.chat.completions.create(
-            model=config.LLM_MODEL,
-            messages=[
-                {'role': 'system', 'content': SYSTEM},
-                {'role': 'user', 'content': (
+        filename_part = fname.split("_", 1)[1] if "_" in fname else fname
+
+        result = await models.complete_json(
+            DeviationSummary,
+            [
+                {"role": "system", "content": SYSTEM},
+                {"role": "user", "content": (
                     f"Document filename: {filename_part}\n\n"
-                    f"Document text (first 12000 chars):\n{text[:12000]}"
+                    f"Document text:\n{text[:MAX_INPUT_CHARS]}"
                 )},
             ],
             temperature=0.1,
-            max_tokens=300,
+            max_tokens=2048,
         )
-        
-        content = response.choices[0].message.content or ''
-        try:
-            # Parse JSON from response (may contain reasoning prefix)
-            import re
-            json_match = re.search(r'\{.*\}', content, re.DOTALL)
-            if json_match:
-                result = json.loads(json_match.group())
-                return {
-                    'title': result.get('title', ''),
-                    'scope': result.get('scope', ''),
-                }
-        except (json.JSONDecodeError, AttributeError):
-            pass
-        
-        return {
-            'title': '',
-            'scope': '',
-        }
+        return {"title": result.title, "scope": result.scope}
     except Exception as e:
         print(f"Error processing {path.name}: {e}")
         return None
@@ -77,6 +61,13 @@ async def extract_from_pdf(path: Path) -> dict | None:
 
 async def main():
     import duckdb
+
+    ok, detail = models.probe()
+    if not ok:
+        print(f"LLM endpoint not usable: {detail}", file=sys.stderr)
+        return 2
+    print(f"LLM: {detail}")
+
     con = duckdb.connect(str(config.DB_PATH))
     
     # Get all deviations that need title/scope
@@ -89,7 +80,8 @@ async def main():
     
     if not rows:
         print("No rows need enrichment")
-        return
+        con.close()
+        return 0
     
     print(f"Enriching {len(rows)} rows...")
     
@@ -118,7 +110,8 @@ async def main():
     
     con.close()
     print("\nDone!")
+    return 0
 
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    sys.exit(asyncio.run(main()))

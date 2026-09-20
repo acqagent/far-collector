@@ -1,7 +1,7 @@
-"""Qwen3.6 planner + relevance scorer."""
+"""Planner + relevance scorer for the generic search-driven mode."""
 from pydantic import BaseModel, Field
 
-from models import client, MODEL
+from models import complete_json
 
 
 class Plan(BaseModel):
@@ -16,9 +16,9 @@ class Relevance(BaseModel):
 
 
 async def plan_searches(user_prompt: str, n: int = 6) -> list[str]:
-    resp = await client.chat.completions.create(
-        model=MODEL,
-        messages=[
+    plan = await complete_json(
+        Plan,
+        [
             {"role": "system", "content": (
                 f"You generate {n} diverse, specific search queries to collect data on a topic.\n"
                 "Cover different angles (overview, recent news, technical detail, opposing views, primary sources).\n"
@@ -26,32 +26,26 @@ async def plan_searches(user_prompt: str, n: int = 6) -> list[str]:
             )},
             {"role": "user", "content": user_prompt},
         ],
-        response_format={"type": "json_schema", "json_schema": {
-            "name": "Plan", "schema": Plan.model_json_schema()
-        }},
         temperature=0.5,
+        max_tokens=2048,
     )
-    plan = Plan.model_validate_json(resp.choices[0].message.content)
     print(f"Plan rationale: {plan.rationale}")
     return plan.queries
 
 
 async def score_relevance(user_prompt: str, page_title: str, page_body: str) -> Relevance:
-    resp = await client.chat.completions.create(
-        model=MODEL,
-        messages=[
+    return await complete_json(
+        Relevance,
+        [
             {"role": "system", "content": (
                 f'Score page relevance for the user\'s collection goal: "{user_prompt}".\n'
                 "Be strict. Off-topic, shallow, or low-quality pages should score below 0.4."
             )},
             {"role": "user", "content": f"TITLE: {page_title}\n\nBODY (first 3000 chars):\n{page_body[:3000]}"},
         ],
-        response_format={"type": "json_schema", "json_schema": {
-            "name": "Relevance", "schema": Relevance.model_json_schema()
-        }},
         temperature=0.1,
+        max_tokens=1024,
     )
-    return Relevance.model_validate_json(resp.choices[0].message.content)
 
 
 def should_continue(collected: int, target: int, avg_relevance: float) -> bool:

@@ -1,6 +1,7 @@
 # Core pipeline dependencies (FAR mode).
-# vLLM (the inference server) is intentionally not listed — install it
-# separately following https://docs.vllm.ai for your CUDA version.
+# The inference server is intentionally not listed here — it is a separate
+# install on the GPU box. See the README: the reference setup is SGLang +
+# Qwen3.8-27B-NVFP4 + DSpark via https://github.com/acqagent/opencode-sglang.
 beautifulsoup4>=4.12
 duckdb>=0.10
 httpx>=0.27

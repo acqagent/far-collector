@@ -2,7 +2,7 @@
 
 Phases:
   1. Read manifest (far_parts, far_part_pdfs) produced by far_seed.py
-  2. For each Part overview page, fetch HTML and use the Qwen3.6 worker to extract
+  2. For each Part overview page, fetch HTML and use the local model to extract
      FAR provisions/clauses (52.X-Y rows) into far_provisions_clauses.
   3. For each agency PDF (excluding DoD), download + parse PDF text. Use
      deterministic regex first; fall back to the worker model for missing fields.
@@ -20,6 +20,7 @@ from rich.console import Console
 import db
 import extract as ex
 import fetch as ft
+import models
 import pdf_extract as pe
 
 console = Console()
@@ -138,4 +139,16 @@ async def main(target: str = "all", only_part: int | None = None) -> int:
 if __name__ == "__main__":
     target = sys.argv[1] if len(sys.argv) > 1 else "all"
     only_part = int(sys.argv[2]) if len(sys.argv) > 2 else None
-    asyncio.run(main(target, only_part))
+
+    # Preflight. Every row this script writes depends on the model, and a
+    # deviations run downloads 1,100 PDFs before the first extraction — finding
+    # out then that the endpoint is unreachable costs an hour.
+    ok, detail = models.probe()
+    if not ok:
+        console.print(f"[red]LLM endpoint not usable:[/] {detail}")
+        console.print("[dim]Run `python llm_check.py` for details, or "
+                      "`python incremental_extract.py --no-llm` for a regex-only pass.[/]")
+        sys.exit(1)
+    console.print(f"[dim]LLM: {detail}[/]")
+
+    sys.exit(asyncio.run(main(target, only_part)))

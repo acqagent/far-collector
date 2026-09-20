@@ -25,31 +25,38 @@ Everything runs **locally** on a single workstation (built and tested on an NVID
 
 | Layer | Tool | Why |
 |---|---|---|
-| Inference server | **[vLLM](https://github.com/vllm-project/vllm)** | OpenAI-compatible server with continuous batching; saturates the GPU at FP4 |
-| Model | **NVIDIA Qwen3.6-35B-A3B-NVFP4** (MoE, 3.6B active params), NVFP4 weights | Sweet spot of capability vs. memory bandwidth on Spark — fast throughput with minimal memory footprint |
-| Client | **AsyncOpenAI** (`openai` Python SDK pointed at `localhost:8000/v1`) | Drop-in API; concurrent extraction calls without writing custom HTTP plumbing |
-| Structured output | **Pydantic v2 schemas** + vLLM's `response_format={"type":"json_schema"}` | Constrained decoding gives valid JSON the first time; no regex post-processing |
+| Inference server | **[SGLang](https://github.com/sgl-project/sglang)**, installed by [`acqagent/opencode-sglang`](https://github.com/acqagent/opencode-sglang) | OpenAI-compatible server on `:30000`, boot-persistent systemd unit, memory-capped so a runaway can't freeze the host |
+| Model | **Qwen3.8-27B-NVFP4** + **DSpark** speculative decoding (`RadixArk/Qwen3.8-27B-NVFP4`, served as `qwen3.8-27b`) | 28-40 tok/s on GB10 for structured/agentic output — roughly 1.3x a stable-MTP engine at the same NVFP4 quality floor, with ~3x faster prefill |
+| Client | **AsyncOpenAI** (`openai` Python SDK pointed at `localhost:30000/v1`) | Drop-in API; bearer auth, long timeouts and a shared concurrency budget live in `models.py` |
+| Structured output | **Pydantic v2 schemas** + `response_format={"type":"json_schema"}` | Constrained decoding gives valid JSON the first time; falls back to `json_object` + an in-prompt schema on servers that don't support it |
 | HTML pipeline | **httpx** (async) → **trafilatura** | Polite concurrent fetches with retry, then mainline-content extraction that strips boilerplate |
 | PDF pipeline | **httpx** (async) → **pypdf** | Streamed PDF download with content-hash caching; per-page text extraction |
 | Storage | **DuckDB** (single file) | Analytical SQL on a laptop; trivial backup; no server to manage |
 | Export | **openpyxl** | Excel with header styling, frozen panes, autosizing, and proper date columns |
 | Retries | **tenacity** | Exponential backoff for transient HTTP failures |
 
-There are two extraction tasks — both go through the same Qwen3.6 model:
+Nothing above is SGLang-specific in a way that locks you in. `FAR_LLM_BASE_URL` / `FAR_LLM_MODEL` point the pipeline at any OpenAI-compatible server (vLLM, llama.cpp, LM Studio, a hosted endpoint); the Qwen3.8 thinking controls are sent as request-body extras that other servers ignore, and constrained decoding degrades gracefully. Run `python llm_check.py` after changing backends.
+
+There are two extraction tasks — both go through the same served model:
 
 - **`extract_far_clauses`** — given the cleaned text of a FAR Overhaul Part page, emit every `52.X-Y` clause / provision with verbatim body text.
 - **`extract_class_deviations`** — given a deviation PDF's text, emit `{agency, deviation_number, title, effective_date, scope, link}`. Regex first attempts to grab the date and deviation number; the LLM fills in title and scope and any field the regex missed.
 
 A separate script (`normalize_dates.py`) post-processes the free-text effective dates into ISO `DATE` values, classifying each as `iso`, `long`, `immediate`, `delta` (e.g. "14 days from signature"), `issuance`, or `unparsed`. About 86% of deviations resolve to a real ISO date; the rest are intentionally NULL because the source text doesn't pin down a calendar date.
 
----
+### Thinking is off by default
+
+Qwen3.8 is a reasoning model, and the served chat template defaults to `xhigh` effort. Extraction is transcription, not reasoning: thinking tokens would multiply the wall-clock cost of a 1,100-PDF run for no accuracy gain, and they count against `max_tokens` — undersize that budget with thinking on and you get an empty completion instead of an answer.
+
+So the pipeline sends `chat_template_kwargs: {"enable_thinking": false}` on every call. Set `FAR_LLM_THINKING=low|medium|xhigh` to turn it back on for a pass that needs the judgment; `models.py` then forwards `reasoning_effort` too, and raises a clear error if the model spends the whole budget thinking.
 
 ## Layout
 
 ```
 collector/
   config.py            central paths + endpoints, all overridable via env vars
-  models.py            AsyncOpenAI client pointed at the local vLLM endpoint
+  models.py            shared OpenAI-compatible client + the JSON-completion helper
+  llm_check.py         preflight: endpoint, auth, model id, structured output
   db.py                DuckDB schema (urls, pages, runs, FAR tables)
   fetch.py             async httpx + trafilatura with raw-HTML cache
   pdf_extract.py       async PDF download + pypdf + regex date heuristics
@@ -86,6 +93,48 @@ Everything under `data/`, `output/`, and `logs/` is `.gitignore`d.
 
 ## Setup
 
+### 1. The model server
+
+The pipeline expects an OpenAI-compatible endpoint. The reference setup is
+[`acqagent/opencode-sglang`](https://github.com/acqagent/opencode-sglang), which installs
+SGLang + Qwen3.8-27B-NVFP4 + DSpark as a boot-persistent service on a DGX Spark:
+
+```bash
+git clone https://github.com/acqagent/opencode-sglang.git
+cd opencode-sglang
+./install.sh          # image + checkpoints + systemd unit, starts at every boot
+```
+
+That gives you `http://localhost:30000/v1`, model id `qwen3.8-27b`, and an API key at
+`~/.config/qwen38/api-key`. The collector reads that key file automatically — the same box
+serving OpenCode serves this pipeline, no extra configuration.
+
+Check it from a client's point of view:
+
+```bash
+systemctl status qwen38-sglang
+curl -H "Authorization: Bearer $(cat ~/.config/qwen38/api-key)" \
+     http://localhost:30000/v1/models
+```
+
+> SGLang's `--api-key` accepts `Authorization: Bearer` only, never `x-api-key`, and it
+> guards `/v1/models` too. A probe that skips the header gets a 401, which is why
+> `models.probe()` authenticates rather than treating any non-200 as "server down".
+
+Running the collector on a **different machine** from the GPU box? Point it at the tailnet
+address and copy the key across:
+
+```bash
+export FAR_LLM_BASE_URL=http://spark.your-tailnet.ts.net:30000/v1
+export FAR_LLM_API_KEY=...          # contents of ~/.config/qwen38/api-key on the Spark
+```
+
+(The SGLang unit binds `0.0.0.0`, so it is already reachable on the tailnet, guarded by the
+bearer token. `opencode-sglang`'s README explains how to lock it to loopback if you'd rather
+it weren't.)
+
+### 2. The collector
+
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
@@ -94,14 +143,17 @@ pip install -r requirements.txt
 pip install -r requirements-generic.txt   # legacy search-driven generic mode
 pip install -r requirements-dev.txt       # pytest, for running the test suite
 
-# vLLM is the heavy install — follow the official instructions for your CUDA
-# version: https://docs.vllm.ai/en/latest/getting_started/installation.html
-# For NVIDIA DGX Spark (sm_121 / GB10), build from source against PyTorch 2.11+cu130.
+python llm_check.py                       # preflight before any long run
 ```
+
+`llm_check.py` verifies the four things that actually break runs — the endpoint answers,
+the token is accepted, `FAR_LLM_MODEL` matches what the server reports at `/v1/models`
+(SGLang's `--served-model-name`, *not* the checkpoint path), and constrained decoding
+returns a valid `ClassDeviationPage`. It also prints the effective settings.
 
 ### Configuration
 
-Everything defaults to paths inside the repo and `localhost:8000`; override with
+Everything defaults to paths inside the repo and `localhost:30000`; override with
 environment variables (see `config.py`):
 
 | Variable | Default | Purpose |
@@ -112,29 +164,43 @@ environment variables (see `config.py`):
 | `FAR_LOG_DIR` | `./logs` | run logs + incremental-pull manifests |
 | `FAR_CORPUS_PDF_DIR` | *(unset)* | optional second directory to mirror PDFs into |
 | `FAR_CORPUS_MANIFEST` | *(unset)* | corpus manifest CSV for `sync_manifest.py` / `regenerate_manifest.py` |
-| `FAR_LLM_BASE_URL` | `http://localhost:8000/v1` | OpenAI-compatible endpoint |
-| `FAR_LLM_MODEL` | `nvidia/Qwen3.6-35B-A3B-NVFP4` | served model name |
 | `FAR_FETCH_USE_CACHE` | *(unset)* | set to `1` to serve HTML re-fetches from the raw cache |
+| `FAR_LLM_BASE_URL` | `http://localhost:30000/v1` | OpenAI-compatible endpoint |
+| `FAR_LLM_MODEL` | `qwen3.8-27b` | served model id — must match `/v1/models` exactly |
+| `FAR_LLM_API_KEY` | *(from key file)* | bearer token; overrides the key file |
+| `FAR_LLM_API_KEY_FILE` | `~/.config/qwen38/api-key` | where to read the token when the env var is unset |
+| `FAR_LLM_THINKING` | `off` | `off`, or `low` / `medium` / `xhigh` reasoning effort |
+| `FAR_LLM_MAX_TOKENS` | `32768` | output ceiling per call |
+| `FAR_LLM_MAX_INPUT_CHARS` | `60000` | source text sent per call (was 20k under a 16k-context server) |
+| `FAR_LLM_CONCURRENCY` | `2` | extraction calls in flight at once |
+| `FAR_LLM_TIMEOUT` | `1800` | whole-request ceiling, seconds |
+| `FAR_LLM_MAX_RETRIES` | `2` | SDK-level retries on transport errors |
+| `FAR_LLM_PROBE_TIMEOUT` | `10` | seconds for the `/v1/models` health check |
 
-Start the model server in a separate terminal:
+Nothing needs a key file to exist: with no `FAR_LLM_API_KEY` and no readable key file, the
+client sends the placeholder `local`, which is what a keyless vLLM or llama.cpp expects.
 
-```bash
-vllm serve nvidia/Qwen3.6-35B-A3B-NVFP4 \
-  --served-model-name qwen3.6 \
-  --port 8000 \
-  --gpu-memory-utilization 0.50 \
-  --max-model-len 16384 \
-  --quantization fp4 \
-  --kv-cache-dtype fp4
-```
+#### Tuning notes
 
-Verify: `curl http://localhost:8000/v1/models` should return one model named `qwen3.6`.
+- **`FAR_LLM_MAX_INPUT_CHARS`** used to be capped at 20k characters because vLLM served a
+  16,384-token context. Qwen3.8 serves 262,144, so the ceiling is now generation time, not
+  the window. 60k characters (~15k tokens) covers essentially every deviation PDF whole.
+  Raise it for the long Part-52 pages; each extra 1k characters of clause text you ask for
+  verbatim is another ~250 tokens to decode at ~30-40 tok/s.
+- **`FAR_LLM_CONCURRENCY`** stays low on purpose. The service runs with
+  `--cuda-graph-max-bs 4`, and DSpark's acceptance rate — the whole speed advantage — falls
+  off as the batch grows. All callers in a process share one semaphore, so raising this is
+  the only lever.
+- **`FAR_LLM_TIMEOUT`** defaults to 30 minutes because a Part-52 page asking for verbatim
+  clause bodies can legitimately generate for that long. The `openai` SDK's own 10-minute
+  default would kill those requests mid-stream.
 
 ---
 
 ## Run
 
 ```bash
+python llm_check.py               # preflight (endpoint, auth, model id, JSON)
 python db.py                      # init schema (idempotent)
 python far_seed.py                # crawl the deviation guide → manifest
 python far_collector.py all       # provisions + class deviations
@@ -150,10 +216,15 @@ python retry_missing.py                  # redownload manifest gaps
 # Incremental (cron-friendly)
 python incremental_pull.py              # discover + download new PDFs only
 python incremental_extract.py           # extract new PDFs into DuckDB
+python incremental_extract.py --no-llm  # regex-only, no model needed
 
-# Tests (no network, no LLM needed)
+# Tests (no network, no GPU, no model server needed)
 python -m pytest
 ```
+
+`incremental_extract.py` degrades rather than failing: if the preflight can't reach the
+model it logs why and writes regex-only rows, so a cron run still lands the new deviations
+and you can enrich them later with `re_extract_all.py`.
 
 For long deviation runs, fire-and-forget:
 
@@ -163,6 +234,36 @@ nohup ./auto_export.sh $! >> logs/auto_export.log 2>&1 &
 ```
 
 `auto_export.sh` polls until the deviation PID exits and then triggers `export_far.py all`.
+
+---
+
+## Handoffs to other tooling
+
+This repo is the *ingest* half of a larger workflow. It publishes three things, and
+everything downstream reads one of them rather than importing this code:
+
+| Handoff | Where | Consumed for |
+|---|---|---|
+| `data/collector.duckdb` | `FAR_DB_PATH` | SQL over `far_class_deviations` + `far_provisions_clauses` |
+| `output/*.xlsx` | `output/` | the SharePoint/matrix workflow — one row per deviation, one per clause |
+| PDF corpus + `manifest.csv` | `FAR_CORPUS_PDF_DIR`, `FAR_CORPUS_MANIFEST` | RAG / knowledge-graph builds over the raw deviation text |
+
+The corpus handoff is the one with moving parts. Set both variables and the collector
+mirrors every downloaded PDF into that directory; `sync_manifest.py` then drops manifest
+rows whose PDF is gone and reports PDFs with no row, and `regenerate_manifest.py` rebuilds
+the CSV from what is on disk plus the DuckDB. Point them at a sibling checkout and the
+corpus repo stays consistent with this one without either repo depending on the other:
+
+```bash
+export FAR_CORPUS_PDF_DIR=../rfo-corpus/pdfs
+export FAR_CORPUS_MANIFEST=../rfo-corpus/manifest.csv
+python sync_manifest.py && python regenerate_manifest.py
+```
+
+The model server is the fourth shared resource: the same SGLang unit serves OpenCode, this
+collector, and anything else on the box, one small batch at a time. Run a 1,100-PDF
+extraction and an interactive coding session simultaneously and they queue behind each
+other — that is what `FAR_LLM_CONCURRENCY` is protecting.
 
 ---
 
@@ -188,4 +289,10 @@ Both are regenerated from the DuckDB on every `export_far.py` run.
 
 - The collector explicitly **excludes DoD** deviations because DFARS lives at a separate publication path (the OUSD(A&S) "Class Deviations" page) and follows a different cadence; pulling DFARS belongs in a separate collector.
 - The deviation guide page occasionally lists PDFs whose URLs return HTTP 404 from acquisition.gov; these get logged but skipped.
-- `find_effective_date()` uses a regex over the PDF text. For PDFs where the first matched "effective <date>" refers to a *predecessor* deviation rather than the current one, the LLM second-pass usually corrects it — but spot-check date outliers after every run.
+- `find_effective_date()` uses a regex over the PDF text. For PDFs where the first matched "effective <date>" refers to a *predecessor* deviation rather than the current one, the LLM second-pass usually corrects it — but spot-check date outliers after every run.- Backend problems surface as a `FAIL` line from `python llm_check.py`, not as silently
+  empty columns. The three that actually happen: a 401 (key file unreadable, or the key
+  rotated), a model-id mismatch after re-pinning the checkpoint, and an empty completion
+  when `FAR_LLM_THINKING` is on with too small a `FAR_LLM_MAX_TOKENS`.
+- Changing servers doesn't need code changes, but it does need a preflight: constrained
+  decoding support varies, and `models.complete_json()` falls back to `json_object` plus an
+  in-prompt schema the first time a server rejects a `json_schema` response format.
