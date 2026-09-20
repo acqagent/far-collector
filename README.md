@@ -237,33 +237,98 @@ nohup ./auto_export.sh $! >> logs/auto_export.log 2>&1 &
 
 ---
 
-## Handoffs to other tooling
+## Where this fits: the three-repo chain
 
-This repo is the *ingest* half of a larger workflow. It publishes three things, and
-everything downstream reads one of them rather than importing this code:
+This repo is the *ingest* stage. Two repos downstream consume what it publishes, in series:
 
-| Handoff | Where | Consumed for |
+```
+  acquisition.gov guide page
+            │
+            ▼
+   ┌──────────────────┐   PDFs + manifest.csv     ┌──────────────────┐
+   │  far-collector   │ ────────────────────────► │  rfo-deviations  │
+   │  (this repo)     │   dated .xlsx exports     │  (corpus repo)   │
+   └──────────────────┘                           └──────────────────┘
+      scrape · extract · normalize                  archive · release        │
+      local Qwen3.8 on SGLang                                                │
+                                                       1,192 deviation PDFs  │
+                                                                             ▼
+                                                    ┌───────────────────────────────┐
+                                                    │ all-civ-agency-far-cds-matrix │
+                                                    │  per-agency Part 52 tracker   │
+                                                    └───────────────────────────────┘
+                                                      33 agency tabs · 702 clause rows
+```
+
+### Stage 1 → 2: far-collector feeds [`rfo-deviations`](https://github.com/acqagent/rfo-deviations)
+
+`rfo-deviations` is the versioned public archive of the corpus. Three artifacts land there,
+and they map one-to-one onto this repo's outputs:
+
+| What lands in `rfo-deviations` | Produced here by | Wired through |
 |---|---|---|
-| `data/collector.duckdb` | `FAR_DB_PATH` | SQL over `far_class_deviations` + `far_provisions_clauses` |
-| `output/*.xlsx` | `output/` | the SharePoint/matrix workflow — one row per deviation, one per clause |
-| PDF corpus + `manifest.csv` | `FAR_CORPUS_PDF_DIR`, `FAR_CORPUS_MANIFEST` | RAG / knowledge-graph builds over the raw deviation text |
+| `manifest.csv` (1,256 rows) | `regenerate_manifest.py` / `sync_manifest.py` | `FAR_CORPUS_MANIFEST` |
+| `pdfs/` → dated release zips | `far_collector.py`, `incremental_pull.py` | `FAR_CORPUS_PDF_DIR` |
+| `far_class_deviations-<date>.xlsx`, `far_provisions_clauses-<date>.xlsx` | `export_far.py` | copied from `output/`, renamed with the scrape date |
 
-The corpus handoff is the one with moving parts. Set both variables and the collector
-mirrors every downloaded PDF into that directory; `sync_manifest.py` then drops manifest
-rows whose PDF is gone and reports PDFs with no row, and `regenerate_manifest.py` rebuilds
-the CSV from what is on disk plus the DuckDB. Point them at a sibling checkout and the
-corpus repo stays consistent with this one without either repo depending on the other:
+The manifest columns are exactly the ones `regenerate_manifest.py` writes —
+`on_disk_filename, url_hash, original_filename, agency, part_number, is_dod, source_url,
+pdf_size_bytes` — so a corpus checkout is a valid `FAR_CORPUS_*` target with no adapter:
 
 ```bash
-export FAR_CORPUS_PDF_DIR=../rfo-corpus/pdfs
-export FAR_CORPUS_MANIFEST=../rfo-corpus/manifest.csv
+export FAR_CORPUS_PDF_DIR=../rfo-deviations/pdfs        # gitignored; ships via Releases
+export FAR_CORPUS_MANIFEST=../rfo-deviations/manifest.csv
 python sync_manifest.py && python regenerate_manifest.py
 ```
 
-The model server is the fourth shared resource: the same SGLang unit serves OpenCode, this
-collector, and anything else on the box, one small batch at a time. Run a 1,100-PDF
-extraction and an interactive coding session simultaneously and they queue behind each
-other — that is what `FAR_LLM_CONCURRENCY` is protecting.
+`sync_manifest.py` drops manifest rows whose PDF is gone and reports PDFs with no row;
+`regenerate_manifest.py` rebuilds the CSV from disk plus the DuckDB. Neither repo imports
+the other — the directory and the CSV are the whole contract.
+
+### Stage 2 → 3: `rfo-deviations` feeds [`all-civ-agency-far-cds-matrix`](https://github.com/acqagent/all-civ-agency-far-cds-matrix)
+
+The matrix repo does **not** read this repo. It reads the corpus: every PDF assigned to an
+agency in `manifest.csv`, plus a blank WarU Provision & Clause template. Per agency, it
+bundles that agency's PDF text into one structured-output call, stamps the extracted
+effective dates and per-clause overrides into a copy of the template, and merges the 33
+agency workbooks into a 34-tab master.
+
+So the manifest is load-bearing twice over: `agency` and `part_number` decide which PDFs go
+into which agency's bundle, and a wrong `part_number` silently mis-stamps a whole FAR Part
+of clauses three repos downstream. That is why the seeding layer is deterministic and
+regex-driven rather than model-driven, and why `tests/` covers it.
+
+That build step runs on a hosted frontier model, not the local box — it is a different
+workload (whole-agency reconciliation across dozens of PDFs at once, not per-document
+transcription). Nothing stops it from pointing at `FAR_LLM_BASE_URL` instead; it would
+trade wall-clock for keeping the data on the box.
+
+### The loop-back, and a filename collision
+
+The matrix master is copied back into `rfo-deviations` as a dated snapshot. As of
+2026-05-02 that copy is **byte-identical** to `far_provisions_clauses_matrix.xlsx`
+(sha256 `5719af51…`) — but it is filed under this repo's export name:
+
+| File in `rfo-deviations` | Sheets | Actually produced by |
+|---|---|---|
+| `far_class_deviations-2026-04-27.xlsx` | 1 — `Class Deviations`, 1,102 rows | `export_far.py` |
+| `far_class_deviations-2026-05-02.xlsx` | **34 — `README` + 33 agency tabs** | the matrix repo |
+| `far_class_deviations-2026-06-23.xlsx` | 1 — `Class Deviations`, 1,221 rows | `export_far.py` |
+
+Anything that globs `far_class_deviations-*.xlsx` and opens the `Class Deviations` sheet
+works on two of those three and raises on the middle one. The corpus README describes the
+05-02 schema change as permanent ("starting 2026-05-03 the file is the per-agency
+clause-level workbook"), but 06-23 is a plain collector export again, so that note no
+longer matches the directory. Worth renaming the odd one out to
+`far_part52_matrix-2026-05-02.xlsx` in the corpus repo; nothing in *this* repo reads those
+files, so it is a rename there and a README correction, not a code change here.
+
+### The shared GPU
+
+The model server is the resource all of this contends for: one SGLang unit serves OpenCode,
+this collector, and anything else on the box, a small batch at a time. Run a 1,100-PDF
+extraction and an interactive coding session together and they queue behind each other —
+that is what `FAR_LLM_CONCURRENCY` is protecting.
 
 ---
 
